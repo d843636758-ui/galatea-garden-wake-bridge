@@ -1,4 +1,4 @@
-import { abortableDelay } from "../backoff.js";
+import { abortableDelay } from "../delay.js";
 import type { Logger } from "../logging.js";
 import type { RuntimeWake, WakeReason } from "../protocol.js";
 import type { RuntimeAdapter, RuntimeWakeInput } from "./adapter.js";

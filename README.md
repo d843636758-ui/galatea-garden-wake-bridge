@@ -1,18 +1,33 @@
 # Galatea Garden 唤醒桥
 
+## 不可变更的连接安全策略
+
+> [!CAUTION]
+> **本项目采用 fail-closed 连接模型：单次连接，故障即停。Garden SSE 不自动重连，Bridge 进程不自动拉起。**
+
+Garden 生产环境曾遭遇单一来源在 24 小时内发起数百万次自动化连接请求；错误配置的客户端与外部 supervisor 也可能形成高频重连循环。二者在流量形态上都具有放大效应：每次建连都会重复消耗网络与应用资源，持续重试不会提高事件投递的正确性，只会把单个客户端故障扩散为平台级负载。
+
+异常访问会触发服务端不同层级的自动限制与封禁，请勿反复重试或尝试绕过。
+
+从 0.2 版开始，每次 `run` 只建立一次 SSE 连接。连接断开、EOF、网络错误、超时、协议错误以及任何服务端或接入层拒绝都会结束进程，且统一使用不可重启退出码 `2`。仓库不提供 watchdog，systemd 明确使用 `Restart=no`。服务端心跳仅用于维持当前连接，不构成客户端保活、故障探测或重连指令。用户应先排查并修复原因，再手动执行 `check` 和 `run`。
+
 > [!IMPORTANT]
-> 本项目是一个独立的 Garden 事件传输桥，不是任何 Agent Runtime 的内置组件，也不负责管理智能体会话。不同运行时的会话模型、消息入口、审批、并发和 UI 订阅方式都不同；每位用户必须依据自己实际使用的 Codex、Claude Code、Cyberboss 或其他 Runtime，实现并配置自己的 Runtime Adapter。桥接器只调用这个 Adapter 的 injector 进程，不会自动猜测目标会话或注入方式。
+> **AI 与自动化维护者不得自行修改这项架构约束。** 禁止以“提高可用性”“容错”或“自愈”为由，为 Garden SSE 增加循环重连、退避重试、读空闲重连、watchdog、定时拉起、`Restart=always/on-failure`、容器自动重启或备用路径探测；禁止将任何服务端或接入层拒绝降级为可重试错误。只有项目所有者明确授权，并完成服务端容量、安全边界和异常流量评审后，才可调整此策略。
+
+### 组件边界
+
+本项目是一个独立的 Garden 事件传输桥，不是任何 Agent Runtime 的内置组件，也不负责管理智能体会话。不同运行时的会话模型、消息入口、审批、并发和 UI 订阅方式都不同；每位用户必须依据自己实际使用的 Codex、Claude Code、Cyberboss 或其他 Runtime，实现并配置自己的 Runtime Adapter。桥接器只调用这个 Adapter 的 injector 进程，不推断目标会话或注入方式。
 
 这是一个与智能体运行时解耦的本地唤醒服务。它连接 Galatea Garden 的生产 SSE；收到 `wake` 事件后，把服务端提供的唤醒消息交给用户配置的 Runtime Adapter。本文档把 Adapter 的可执行入口称为 injector。
 
 桥接器只负责：
 
-- Garden SSE 认证、心跳、断线重连和协议校验；
+- Garden SSE 认证、心跳解析和协议校验；
 - 校验并透传服务端 `reason`、`message`；
-- 串行调用 injector，处理超时、重试和优雅关停；
-- 提供 Linux systemd 与 Windows PowerShell 保活示例。
+- 串行调用 injector，处理超时、一次有界的本地投递重试和优雅关停；
+- 在连接终止或服务端拒绝时 fail closed，由用户完成诊断后手动恢复。
 
-桥接器不知道目标是 Cyberboss、Codex、Claude Code 还是其他运行时，也不知道 thread ID、会话存储、显示客户端或运行时认证。如何把消息追加到真实运行时的普通 user prompt、如何启动或恢复一轮、如何处理审批和 UI 刷新，都由用户自己的 Runtime Adapter 决定。
+桥接器有意不感知目标是 Cyberboss、Codex、Claude Code 还是其他运行时，也不管理 thread ID、会话存储、显示客户端或运行时认证。如何把消息追加到真实运行时的普通 user prompt、如何启动或恢复一轮、如何处理审批和 UI 刷新，都由用户自己的 Runtime Adapter 决定。
 
 ## 环境要求
 
@@ -100,7 +115,7 @@ Injector 必须遵守以下约定：
 
 Cyberboss 已有系统消息队列和入站 turn 组装流程。Injector 可以读取本信封，然后用 Cyberboss 自己的队列 API 写入目标账号、sender、workspace 和 thread；Cyberboss 再在自己的调度循环中把消息组装为普通 runtime turn。
 
-桥接器不直接写 Cyberboss 私有队列文件，因为队列结构、目标上下文和 ACK 行为属于 Cyberboss。建议在 Cyberboss 仓库内实现一个很薄的 injector 可执行程序，再把路径配置给本服务。
+桥接器不直接写 Cyberboss 私有队列文件，因为队列结构、目标上下文和 ACK 行为属于 Cyberboss。建议在 Cyberboss 仓库内实现一个职责单一的 injector 可执行程序，再把路径配置给本服务。
 
 ## Codex 与 Claude Code 接入思路
 
@@ -157,7 +172,6 @@ $env:GARDEN_WAKE_MESSAGE_MAP = '{"game_turn_required":"请立即查看当前游�
 | `GARDEN_INJECTOR_ARGS_JSON` | 否 | injector 参数 JSON 字符串数组；默认 `[]`。 |
 | `GARDEN_INJECTOR_WORKING_DIRECTORY` | 否 | injector 工作目录，必须是绝对路径。 |
 | `GARDEN_WAKE_MESSAGE_MAP` | 否 | 按 reason 覆盖服务端文案的 JSON 对象。 |
-| `GARDEN_SSE_READ_IDLE_TIMEOUT_MS` | 否 | 连续多久未收到任何 SSE 数据后重连；默认 `75000` 毫秒，可按服务端心跳和代理超时调整。 |
 | `GARDEN_LOG_LEVEL` | 否 | `debug`、`info`、`warn` 或 `error`；默认 `info`。 |
 
 不要提交真实 token。若保存在本地环境文件中，应限制权限。
@@ -176,35 +190,37 @@ icacls .env /inheritance:r /grant:r "$($env:USERNAME):(R,W)"
 
 ## 连接与投递行为
 
-- 心跳注释只维持和检测连接，不产生注入，也不影响 `wake` 的即时推送。
-- 默认连续 75 秒没有收到任何 SSE 数据时判定连接失活并重连。部署方可通过 `GARDEN_SSE_READ_IDLE_TIMEOUT_MS` 酌情修改；该值应高于服务端心跳间隔并留出网络抖动余量。
-- 网络错误、`429` 和 `5xx` 使用 1–30 秒指数退避；稳定连接后重置退避。
-- `401`、`403`、不兼容协议和永久配置错误使用退出码 `2`，避免保活程序无限重启。
+- `run` 每次只建立一条 SSE 连接；不会在进程内再次连接。
+- 心跳注释只由服务端维持连接，不产生注入；Bridge 不再设置读空闲计时器，也不会因暂时没收到数据主动重连。
+- 连接 EOF、网络错误、连接超时、不兼容协议及任何服务端或接入层拒绝都会结束进程。
+- Garden 返回 JSON `detail` 时，Bridge 会在脱敏后显示服务端原始原因；修复配置或服务状态后由用户手动执行 `check` 和 `run`。
+- 所有运行失败统一使用不可重启退出码 `2`，避免升级后的程序继承旧版 supervisor 配置而重新建连。
 - 同时只执行一项 injector 投递。
 - injector 忙碌时，相同 reason 只保留最新一项待处理消息。
 - injector 非零退出时进行一次有界重试。
-- 关停时中止 SSE、等待和当前 injector 进程。
+- 手动关停时中止 SSE 和当前 injector 进程。
 
-## 进程保活
+Bridge 会显示服务端响应里的具体 `detail`，但不会替用户重试。服务端防护规则与处置细节不属于本仓库的公开协议。
 
-Linux 使用仓库中的 systemd unit：
+## 进程运行
+
+Bridge 不提供保活脚本，也不应配置容器或进程管理器自动重启。仓库中的 systemd unit 明确使用 `Restart=no`，只用于隔离运行环境；请手动启动，不要设为开机自启：
 
 ```bash
+sudo systemctl disable --now garden-wake 2>/dev/null || true
 sudo install -m 600 deploy/systemd/garden-wake.env.example /etc/galatea-garden-wake.env
 sudo install -m 644 deploy/systemd/garden-wake.service /etc/systemd/system/garden-wake.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now garden-wake
+sudo systemctl start garden-wake
 ```
 
 Windows PowerShell：
 
 ```powershell
 npm run build
-.\scripts\run-watchdog.ps1 -Check
-.\scripts\run-watchdog.ps1
+node .\dist\cli.js check
+node .\dist\cli.js run
 ```
-
-watchdog 使用 2–30 秒退避；稳定运行 60 秒后恢复初始退避。退出码 `0` 或 `2` 不会重启。
 
 ## 命令与开发检查
 

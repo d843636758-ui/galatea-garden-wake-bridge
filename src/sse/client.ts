@@ -9,43 +9,32 @@ import {
 } from "../protocol.js";
 import { SseParser } from "./parser.js";
 
-export type GardenStreamErrorKind = "auth" | "terminal" | "retryable";
+export type GardenStreamErrorKind = "auth" | "terminal";
 
 export class GardenStreamError extends Error {
   readonly kind: GardenStreamErrorKind;
   readonly status: number | undefined;
-  readonly connectionDurationMs: number;
 
-  constructor(
-    kind: GardenStreamErrorKind,
-    message: string,
-    status?: number,
-    connectionDurationMs = 0,
-  ) {
+  constructor(kind: GardenStreamErrorKind, message: string, status?: number) {
     super(message);
     this.name = "GardenStreamError";
     this.kind = kind;
     this.status = status;
-    this.connectionDurationMs = connectionDurationMs;
   }
 }
 
 class ConnectTimeoutError extends Error {}
-class ReadIdleTimeoutError extends Error {}
 
 export interface GardenSseClientOptions {
   baseUrl: URL;
   machineToken: string;
   connectTimeoutMs: number;
-  readIdleTimeoutMs: number;
   logger: Logger;
   fetch?: typeof globalThis.fetch;
-  now?: () => number;
 }
 
 export interface StreamAttemptResult {
   connected: boolean;
-  durationMs: number;
   stopped: boolean;
 }
 
@@ -57,12 +46,10 @@ export interface StreamAttemptHandlers {
 export class GardenSseClient {
   readonly #options: GardenSseClientOptions;
   readonly #fetch: typeof globalThis.fetch;
-  readonly #now: () => number;
 
   constructor(options: GardenSseClientOptions) {
     this.#options = { ...options, baseUrl: validateGardenBaseUrl(options.baseUrl) };
     this.#fetch = options.fetch ?? globalThis.fetch;
-    this.#now = options.now ?? Date.now;
   }
 
   async streamOnce(
@@ -70,7 +57,7 @@ export class GardenSseClient {
     signal: AbortSignal,
   ): Promise<StreamAttemptResult> {
     if (signal.aborted) {
-      return { connected: false, durationMs: 0, stopped: true };
+      return { connected: false, stopped: true };
     }
     const requestController = new AbortController();
     const forwardAbort = (): void => requestController.abort(signal.reason);
@@ -96,7 +83,10 @@ export class GardenSseClient {
       });
     } catch (error) {
       signal.removeEventListener("abort", forwardAbort);
-      throw this.#requestFailure(error, requestController.signal, signal);
+      if (signal.aborted) {
+        return { connected: false, stopped: true };
+      }
+      throw this.#requestFailure(error, requestController.signal);
     } finally {
       if (connectTimer) {
         clearTimeout(connectTimer);
@@ -105,19 +95,13 @@ export class GardenSseClient {
     }
 
     try {
-      try {
-        this.#validateResponse(response);
-      } catch (error) {
-        await this.#cancelBody(response.body, "invalid SSE response");
-        throw error;
-      }
+      await this.#validateResponse(response);
       if (!response.body) {
         throw new GardenStreamError("terminal", "SSE response body is unavailable");
       }
 
       const reader = response.body.getReader();
       let connected = false;
-      let connectedAt: number | undefined;
       let stopRequested = false;
       const parser = new SseParser({
         onEvent: (rawEvent) => {
@@ -131,7 +115,6 @@ export class GardenSseClient {
           }
           if (event.kind === "connected") {
             connected = true;
-            connectedAt ??= this.#now();
           } else if (!connected) {
             handlers.onIgnored?.({
               cause: "wake event received before protocol handshake",
@@ -145,50 +128,26 @@ export class GardenSseClient {
 
       try {
         while (!signal.aborted && !stopRequested) {
-          const readIdleTimer = setTimeout(() => {
-            requestController.abort(new ReadIdleTimeoutError("SSE read timed out"));
-          }, this.#options.readIdleTimeoutMs);
-          try {
-            const result = await reader.read();
-            if (result.done) {
-              parser.finish();
-              break;
-            }
-            parser.push(result.value);
-          } finally {
-            clearTimeout(readIdleTimer);
+          const result = await reader.read();
+          if (result.done) {
+            parser.finish();
+            break;
           }
+          parser.push(result.value);
         }
       } catch (error) {
         if (signal.aborted) {
           return {
             connected,
-            durationMs: connectedAt === undefined ? 0 : this.#now() - connectedAt,
             stopped: true,
           };
         }
-        const reason = requestController.signal.reason;
-        if (reason instanceof ReadIdleTimeoutError) {
-          throw new GardenStreamError(
-            "retryable",
-            reason.message,
-            undefined,
-            connectedAt === undefined ? 0 : this.#now() - connectedAt,
-          );
-        }
         if (error instanceof GardenStreamError) {
-          throw new GardenStreamError(
-            error.kind,
-            error.message,
-            error.status,
-            connectedAt === undefined ? 0 : this.#now() - connectedAt,
-          );
+          throw error;
         }
         throw new GardenStreamError(
-          "retryable",
+          "terminal",
           `SSE stream failed: ${safeErrorMessage(error, [this.#options.machineToken])}`,
-          undefined,
-          connectedAt === undefined ? 0 : this.#now() - connectedAt,
         );
       } finally {
         await reader.cancel().catch((error: unknown) => {
@@ -200,7 +159,6 @@ export class GardenSseClient {
 
       return {
         connected,
-        durationMs: connectedAt === undefined ? 0 : this.#now() - connectedAt,
         stopped: signal.aborted || stopRequested,
       };
     } finally {
@@ -229,10 +187,12 @@ export class GardenSseClient {
     );
     if (!handshakeSeen) {
       throw new GardenStreamError(
-        signal.aborted ? "retryable" : "terminal",
-        result.connected
-          ? "SSE probe ended unexpectedly"
-          : "SSE stream ended before the connected event",
+        "terminal",
+        signal.aborted
+          ? "SSE probe stopped before the connected event"
+          : result.connected
+            ? "SSE probe ended unexpectedly"
+            : "SSE stream ended before the connected event",
       );
     }
   }
@@ -244,54 +204,59 @@ export class GardenSseClient {
   #requestFailure(
     error: unknown,
     requestSignal: AbortSignal,
-    externalSignal: AbortSignal,
   ): GardenStreamError {
-    if (externalSignal.aborted) {
-      return new GardenStreamError("retryable", "bridge stopped");
-    }
     if (requestSignal.reason instanceof ConnectTimeoutError) {
-      return new GardenStreamError("retryable", requestSignal.reason.message);
+      return new GardenStreamError("terminal", requestSignal.reason.message);
     }
     return new GardenStreamError(
-      "retryable",
+      "terminal",
       `SSE connection failed: ${safeErrorMessage(error, [this.#options.machineToken])}`,
     );
   }
 
-  #validateResponse(response: Response): void {
-    if (response.status === 401 || response.status === 403) {
-      throw new GardenStreamError("auth", "Garden rejected the machine token", response.status);
-    }
-    if (response.status === 429 || response.status >= 500) {
-      throw new GardenStreamError(
-        "retryable",
-        `Garden SSE request failed with HTTP ${response.status}`,
-        response.status,
-      );
-    }
-    if (response.status >= 300 && response.status < 400) {
-      throw new GardenStreamError(
-        "terminal",
-        `Garden SSE redirects are not allowed (HTTP ${response.status})`,
-        response.status,
-      );
-    }
+  async #validateResponse(response: Response): Promise<void> {
     if (!response.ok) {
+      const detail = await this.#responseDetail(response);
+      const message = detail
+        ? `Garden SSE request failed with HTTP ${response.status}: ${detail}`
+        : `Garden SSE request failed with HTTP ${response.status}`;
       throw new GardenStreamError(
-        "terminal",
-        `Garden SSE request failed with HTTP ${response.status}`,
+        response.status === 401 ? "auth" : "terminal",
+        message,
         response.status,
       );
     }
     const contentType =
       response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
     if (contentType !== "text/event-stream") {
+      await this.#cancelBody(response.body, "invalid SSE content type");
       throw new GardenStreamError(
         "terminal",
         "Garden SSE response has an invalid content type",
         response.status,
       );
     }
+  }
+
+  async #responseDetail(response: Response): Promise<string> {
+    const body = await response.text().catch(() => "");
+    if (!body.trim()) {
+      return "";
+    }
+    try {
+      const parsed: unknown = JSON.parse(body);
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        "detail" in parsed &&
+        typeof parsed.detail === "string"
+      ) {
+        return safeErrorMessage(parsed.detail, [this.#options.machineToken]);
+      }
+    } catch {
+      // Non-JSON proxy responses are represented by their HTTP status only.
+    }
+    return "";
   }
 
   async #cancelBody(body: ReadableStream<Uint8Array> | null, operation: string): Promise<void> {

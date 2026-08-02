@@ -8,18 +8,14 @@ import { isAbsolute } from "node:path";
 
 export interface BridgeTimeouts {
   readonly connectMs: number;
-  readonly readIdleMs: number;
   readonly checkMs: number;
-  readonly stableConnectionMs: number;
   readonly runtimeDeliveryMs: number;
   readonly runtimeCloseMs: number;
 }
 
 export const DEFAULT_TIMEOUTS: Readonly<BridgeTimeouts> = Object.freeze({
   connectMs: 10_000,
-  readIdleMs: 75_000,
   checkMs: 10_000,
-  stableConnectionMs: 10_000,
   runtimeDeliveryMs: 15 * 60_000,
   runtimeCloseMs: 10_000,
 });
@@ -87,19 +83,6 @@ function parseLogLevel(raw: string | undefined): LogLevel {
     return value;
   }
   throw new ConfigError("GARDEN_LOG_LEVEL must be debug, info, warn, or error");
-}
-
-function parseSseReadIdleTimeoutMs(raw: string | undefined): number {
-  if (!raw?.trim()) {
-    return DEFAULT_TIMEOUTS.readIdleMs;
-  }
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value) || value < 1_000 || value > 86_400_000) {
-    throw new ConfigError(
-      "GARDEN_SSE_READ_IDLE_TIMEOUT_MS must be an integer between 1000 and 86400000",
-    );
-  }
-  return value;
 }
 
 function parseWakeMessageMap(raw: string | undefined): WakeMessageMap {
@@ -183,9 +166,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
       ),
     }),
     logLevel: parseLogLevel(env.GARDEN_LOG_LEVEL),
-    timeouts: Object.freeze({
-      ...DEFAULT_TIMEOUTS,
-      readIdleMs: parseSseReadIdleTimeoutMs(env.GARDEN_SSE_READ_IDLE_TIMEOUT_MS),
-    }),
+    timeouts: DEFAULT_TIMEOUTS,
   };
 }

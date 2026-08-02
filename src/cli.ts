@@ -1,34 +1,28 @@
 #!/usr/bin/env node
 
 import { pathToFileURL } from "node:url";
-import { ConfigError, loadConfig } from "./config.js";
+import { loadConfig } from "./config.js";
 import { createLogger, safeErrorMessage } from "./logging.js";
 import { createRuntimeAdapter } from "./runtime/create-adapter.js";
 import { runBridge } from "./runner.js";
 import { installShutdownHandlers } from "./shutdown.js";
-import { GardenSseClient, GardenStreamError } from "./sse/client.js";
+import { GardenSseClient } from "./sse/client.js";
 import { VERSION } from "./version.js";
 
 const HELP = `garden-wake ${VERSION}
 
 Usage:
-  garden-wake run       Keep the wake bridge in the foreground
+  garden-wake run       Open one foreground Garden SSE connection
   garden-wake check     Validate configuration and the SSE handshake
   garden-wake --version Print the version
   garden-wake --help    Show this help
 `;
 
-export function exitCodeForError(error: unknown): 1 | 2 {
-  if (error instanceof ConfigError) {
-    return 2;
-  }
-  if (
-    error instanceof GardenStreamError &&
-    (error.kind === "auth" || error.kind === "terminal")
-  ) {
-    return 2;
-  }
-  return 1;
+export function exitCodeForError(_error: unknown): 2 {
+  // Version 0.1 systemd/watchdog examples treated exit code 2 as permanent.
+  // Keep every failure non-restartable so an upgraded binary cannot inherit a
+  // reconnect loop from an old supervisor configuration.
+  return 2;
 }
 
 export async function runCli(
@@ -74,7 +68,6 @@ export async function runCli(
           baseUrl: config.baseUrl,
           machineToken: config.machineToken,
           connectTimeoutMs: config.timeouts.connectMs,
-          readIdleTimeoutMs: config.timeouts.readIdleMs,
           logger,
         });
         await client.probe(shutdown.signal);

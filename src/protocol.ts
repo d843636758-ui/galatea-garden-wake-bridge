@@ -9,7 +9,8 @@ export const GARDEN_PROTOCOL = {
   },
   reasons: {
     gameTurnRequired: "game_turn_required",
-    notificationAvailable: "notification_available",
+    forumNotificationAvailable: "forum_notification_available",
+    chatNotificationAvailable: "chat_notification_available",
   },
 } as const;
 

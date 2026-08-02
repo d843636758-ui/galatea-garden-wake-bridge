@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ReconnectBackoff } from "../src/backoff.js";
 import { DEFAULT_TIMEOUTS, type BridgeConfig } from "../src/config.js";
 import { silentLogger } from "../src/logging.js";
 import type { RuntimeWake } from "../src/protocol.js";
@@ -24,16 +23,15 @@ function config(): BridgeConfig {
   };
 }
 
-test("does not retry an authentication failure", async () => {
+test("opens only one stream and exits after Garden rejects it", async () => {
   let streamAttempts = 0;
-  let sleeps = 0;
   let adapterClosed = false;
-  const client = {
+  const client: GardenEventStream = {
     streamOnce: async () => {
       streamAttempts += 1;
-      throw new GardenStreamError("auth", "unauthorized", 401);
+      throw new GardenStreamError("auth", "invalid token", 401);
     },
-  } satisfies GardenEventStream;
+  };
   const adapter: RuntimeAdapter = {
     wake: async () => undefined,
     close: async () => {
@@ -45,20 +43,40 @@ test("does not retry an authentication failure", async () => {
     () =>
       runBridge(config(), adapter, silentLogger, new AbortController().signal, {
         createClient: () => client,
-        sleep: async () => {
-          sleeps += 1;
-        },
       }),
-    (error: unknown) => error instanceof GardenStreamError && error.kind === "auth",
+    (error: unknown) =>
+      error instanceof GardenStreamError && error.status === 401,
   );
 
   assert.equal(streamAttempts, 1);
-  assert.equal(sleeps, 0);
   assert.equal(adapterClosed, true);
 });
 
-test("overrides only configured wake messages and passes through the rest", async () => {
-  const controller = new AbortController();
+test("does not reconnect after an unexpected stream end", async () => {
+  let streamAttempts = 0;
+  const client: GardenEventStream = {
+    streamOnce: async (handlers) => {
+      streamAttempts += 1;
+      handlers.onEvent({ kind: "connected", version: 1 });
+      return { connected: true, stopped: false };
+    },
+  };
+
+  await assert.rejects(
+    () =>
+      runBridge(
+        config(),
+        { wake: async () => undefined },
+        silentLogger,
+        new AbortController().signal,
+        { createClient: () => client },
+      ),
+    /stream ended; restart the bridge manually/,
+  );
+  assert.equal(streamAttempts, 1);
+});
+
+test("overrides only configured wake messages and delivers queued wakes before exit", async () => {
   const received: RuntimeWake[] = [];
   const client: GardenEventStream = {
     streamOnce: async (handlers) => {
@@ -73,27 +91,27 @@ test("overrides only configured wake messages and passes through the rest", asyn
         reason: "forum_notification_available",
         message: "服务端论坛通知文案",
       });
-      return { connected: true, durationMs: 1, stopped: false };
-    },
-  };
-  const adapter: RuntimeAdapter = {
-    wake: async ({ reason, message }) => {
-      received.push({ reason, message });
-      if (received.length === 2) {
-        controller.abort();
-      }
+      return { connected: true, stopped: false };
     },
   };
 
-  await runBridge(
-    {
-      ...config(),
-      wakeMessageMap: { game_turn_required: "本地自定义游戏文案" },
-    },
-    adapter,
-    silentLogger,
-    controller.signal,
-    { createClient: () => client },
+  await assert.rejects(
+    () =>
+      runBridge(
+        {
+          ...config(),
+          wakeMessageMap: { game_turn_required: "本地自定义游戏文案" },
+        },
+        {
+          wake: async ({ reason, message }) => {
+            received.push({ reason, message });
+          },
+        },
+        silentLogger,
+        new AbortController().signal,
+        { createClient: () => client },
+      ),
+    GardenStreamError,
   );
 
   assert.deepEqual(received, [
@@ -102,80 +120,32 @@ test("overrides only configured wake messages and passes through the rest", asyn
   ]);
 });
 
-test("retries failures and resets backoff only after a stable connection", async () => {
-  const results = [
-    { connected: true, durationMs: 100, stopped: false },
-    { connected: false, durationMs: DEFAULT_TIMEOUTS.stableConnectionMs, stopped: false },
-    {
-      connected: true,
-      durationMs: DEFAULT_TIMEOUTS.stableConnectionMs,
-      stopped: false,
-    },
-  ];
+test("manual shutdown closes the single stream and runtime adapter cleanly", async () => {
   const controller = new AbortController();
-  const delays: number[] = [];
   let streamAttempts = 0;
-  const client = {
-    streamOnce: async () => {
-      const result = results[streamAttempts] ?? {
-        connected: false,
-        durationMs: 0,
-        stopped: false,
-      };
-      streamAttempts += 1;
-      return result;
-    },
-  } satisfies GardenEventStream;
-  const backoff = new ReconnectBackoff({
-    baseDelayMs: 1_000,
-    maxDelayMs: 30_000,
-    jitterRatio: 0,
-    random: () => 1,
-  });
-
-  await runBridge(
-    config(),
-    { wake: async () => undefined },
-    silentLogger,
-    controller.signal,
-    {
-      createClient: () => client,
-      backoff,
-      sleep: async (delayMs) => {
-        delays.push(delayMs);
-        if (delays.length === 3) {
-          controller.abort();
-        }
-      },
-    },
-  );
-
-  assert.equal(streamAttempts, 3);
-  assert.deepEqual(delays, [1_000, 2_000, 1_000]);
-});
-
-test("shutdown interrupts reconnect sleep and closes the runtime adapter", async () => {
-  const controller = new AbortController();
   let adapterClosed = false;
-  const client = {
-    streamOnce: async () => ({ connected: true, durationMs: 1, stopped: false }),
-  } satisfies GardenEventStream;
-  const adapter: RuntimeAdapter = {
-    wake: async () => undefined,
-    close: async () => {
-      adapterClosed = true;
+  const client: GardenEventStream = {
+    streamOnce: async () => {
+      streamAttempts += 1;
+      controller.abort();
+      return { connected: true, stopped: true };
     },
   };
 
-  const running = runBridge(config(), adapter, silentLogger, controller.signal, {
-    createClient: () => client,
-    sleep: async (_delayMs, signal) => {
-      controller.abort();
-      assert.equal(signal.aborted, true);
+  await runBridge(
+    config(),
+    {
+      wake: async () => undefined,
+      close: async () => {
+        adapterClosed = true;
+      },
     },
-  });
+    silentLogger,
+    controller.signal,
+    { createClient: () => client },
+  );
 
-  await running;
+  assert.equal(streamAttempts, 1);
   assert.equal(adapterClosed, true);
 });
 
@@ -238,42 +208,4 @@ test("routes SSE wakes end to end through the runner and runtime adapter", async
   } finally {
     await server.close();
   }
-});
-
-test("retryable stream errors reconnect and a stable failed stream resets backoff", async () => {
-  const controller = new AbortController();
-  const delays: number[] = [];
-  let attempts = 0;
-  const client: GardenEventStream = {
-    streamOnce: async () => {
-      attempts += 1;
-      const duration = attempts === 1 ? 0 : DEFAULT_TIMEOUTS.stableConnectionMs;
-      throw new GardenStreamError("retryable", "network failed", undefined, duration);
-    },
-  };
-  const backoff = new ReconnectBackoff({
-    baseDelayMs: 1_000,
-    maxDelayMs: 30_000,
-    jitterRatio: 0,
-  });
-
-  await runBridge(
-    config(),
-    { wake: async () => undefined },
-    silentLogger,
-    controller.signal,
-    {
-      createClient: () => client,
-      backoff,
-      sleep: async (delayMs) => {
-        delays.push(delayMs);
-        if (delays.length === 2) {
-          controller.abort();
-        }
-      },
-    },
-  );
-
-  assert.equal(attempts, 2);
-  assert.deepEqual(delays, [1_000, 1_000]);
 });

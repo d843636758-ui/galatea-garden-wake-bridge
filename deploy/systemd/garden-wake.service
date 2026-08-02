@@ -2,8 +2,6 @@
 Description=Galatea Garden 唤醒桥
 Wants=network-online.target
 After=network-online.target
-StartLimitIntervalSec=300
-StartLimitBurst=6
 
 [Service]
 Type=simple
@@ -12,15 +10,10 @@ Group=garden-wake
 WorkingDirectory=/opt/galatea-garden-wake-bridge
 EnvironmentFile=/etc/galatea-garden-wake.env
 ExecStart=/usr/bin/node /opt/galatea-garden-wake-bridge/dist/cli.js run
-Restart=on-failure
-RestartSec=5
-RestartPreventExitStatus=2
+Restart=no
 TimeoutStopSec=20
 KillSignal=SIGTERM
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-
-[Install]
-WantedBy=multi-user.target

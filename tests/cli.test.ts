@@ -4,9 +4,7 @@ import { EventEmitter } from "node:events";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { exitCodeForError } from "../src/cli.js";
-import { ConfigError } from "../src/config.js";
 import { installShutdownHandlers, SHUTDOWN_SIGNALS } from "../src/shutdown.js";
-import { GardenStreamError } from "../src/sse/client.js";
 import { startTestGardenServer } from "./helpers/test-sse-server.js";
 
 const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -59,15 +57,12 @@ test("compiled CLI starts through the platform Node executable", async () => {
 
   assert.equal(result.code, 0);
   assert.equal(result.signal, null);
-  assert.equal(stdout.trim(), "0.1.0");
+  assert.equal(stdout.trim(), "0.2.0");
 });
 
-test("uses a non-restartable exit code for permanent configuration and auth failures", () => {
-  assert.equal(exitCodeForError(new GardenStreamError("auth", "unauthorized")), 2);
-  assert.equal(exitCodeForError(new GardenStreamError("terminal", "contract mismatch")), 2);
-  assert.equal(exitCodeForError(new ConfigError("invalid runtime configuration")), 2);
-  assert.equal(exitCodeForError(new GardenStreamError("retryable", "network failed")), 1);
-  assert.equal(exitCodeForError(new Error("unexpected crash")), 1);
+test("uses a non-restartable exit code for every bridge failure", () => {
+  assert.equal(exitCodeForError(new Error("unexpected crash")), 2);
+  assert.equal(exitCodeForError("non-error rejection"), 2);
 });
 
 test("compiled check command exits with code 2 after machine-token rejection", async () => {
@@ -87,7 +82,7 @@ test("compiled check command exits with code 2 after machine-token rejection", a
     const result = await waitForExit(child);
     assert.equal(result.code, 2);
     assert.equal(result.signal, null);
-    assert.match(result.stderr, /Garden rejected the machine token/);
+    assert.match(result.stderr, /HTTP 401/);
   } finally {
     if (child.exitCode === null && child.signalCode === null) {
       child.kill("SIGKILL");

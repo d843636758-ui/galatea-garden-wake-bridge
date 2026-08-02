@@ -13,14 +13,12 @@ function clientFor(
     token?: string;
     fetch?: typeof globalThis.fetch;
     connectTimeoutMs?: number;
-    readIdleTimeoutMs?: number;
   } = {},
 ): GardenSseClient {
   return new GardenSseClient({
     baseUrl,
     machineToken: options.token ?? TOKEN,
     connectTimeoutMs: options.connectTimeoutMs ?? 1_000,
-    readIdleTimeoutMs: options.readIdleTimeoutMs ?? 1_000,
     logger: silentLogger,
     ...(options.fetch ? { fetch: options.fetch } : {}),
   });
@@ -91,7 +89,7 @@ test("streams server-defined wake reasons end to end from a local test SSE serve
   }
 });
 
-test("treats 401 and 403 as terminal authentication failures", async () => {
+test("treats 401 and 403 as terminal server rejections", async () => {
   const server = await startTestGardenServer({ machineToken: TOKEN });
   try {
     await assert.rejects(
@@ -107,28 +105,29 @@ test("treats 401 and 403 as terminal authentication failures", async () => {
     await server.close();
   }
 
-  const forbiddenFetch: typeof globalThis.fetch = async () => new Response(null, { status: 403 });
+  const forbiddenFetch: typeof globalThis.fetch = async () =>
+    Response.json(
+      { detail: "Wake Bridge notifications are disabled for this machine" },
+      { status: 403 },
+    );
   await assert.rejects(
     () =>
       clientFor(new URL("https://garden.example.com"), { fetch: forbiddenFetch }).streamOnce(
         { onEvent: () => undefined },
         new AbortController().signal,
       ),
-    (error: unknown) => error instanceof GardenStreamError && error.kind === "auth",
+    (error: unknown) =>
+      error instanceof GardenStreamError &&
+      error.kind === "terminal" &&
+      error.status === 403 &&
+      /notifications are disabled/.test(error.message),
   );
 });
 
-test("classifies retryable and permanent HTTP failures and rejects redirects", async () => {
-  const cases: Array<[number, "retryable" | "terminal"]> = [
-    [429, "retryable"],
-    [500, "retryable"],
-    [503, "retryable"],
-    [400, "terminal"],
-    [404, "terminal"],
-    [302, "terminal"],
-  ];
+test("treats every non-success HTTP response as terminal", async () => {
+  const cases = [429, 500, 503, 400, 404, 302];
 
-  for (const [status, expectedKind] of cases) {
+  for (const status of cases) {
     let redirectMode: RequestRedirect | undefined;
     const fetch: typeof globalThis.fetch = async (_input, init) => {
       redirectMode = init?.redirect;
@@ -143,7 +142,10 @@ test("classifies retryable and permanent HTTP failures and rejects redirects", a
           { onEvent: () => undefined },
           new AbortController().signal,
         ),
-      (error: unknown) => error instanceof GardenStreamError && error.kind === expectedKind,
+      (error: unknown) =>
+        error instanceof GardenStreamError &&
+        error.kind === "terminal" &&
+        error.status === status,
     );
     assert.equal(redirectMode, "manual");
   }
@@ -177,14 +179,15 @@ test("rejects a successful response with the wrong content type", async () => {
   );
 });
 
-test("cancels an error response body before classifying the failure", async () => {
-  let cancelled = false;
-  const body = new ReadableStream<Uint8Array>({
-    cancel: () => {
-      cancelled = true;
-    },
-  });
-  const fetch: typeof globalThis.fetch = async () => new Response(body, { status: 503 });
+test("uses the current Garden error detail without retrying", async () => {
+  const fetch: typeof globalThis.fetch = async () =>
+    Response.json(
+      {
+        detail:
+          "Wake Bridge token revoked; inspect duplicate Bridge processes before generating a new token",
+      },
+      { status: 403 },
+    );
 
   await assert.rejects(
     () =>
@@ -192,9 +195,11 @@ test("cancels an error response body before classifying the failure", async () =
         { onEvent: () => undefined },
         new AbortController().signal,
       ),
-    (error: unknown) => error instanceof GardenStreamError && error.kind === "retryable",
+    (error: unknown) =>
+      error instanceof GardenStreamError &&
+      error.kind === "terminal" &&
+      /token revoked; inspect duplicate Bridge processes/.test(error.message),
   );
-  assert.equal(cancelled, true);
 });
 
 test("a pre-aborted signal never opens an authenticated request", async () => {
@@ -235,7 +240,7 @@ test("redacts the machine token from connection errors", async () => {
       ),
     (error: unknown) => {
       assert.ok(error instanceof GardenStreamError);
-      assert.equal(error.kind, "retryable");
+      assert.equal(error.kind, "terminal");
       assert.doesNotMatch(error.message, new RegExp(TOKEN));
       assert.match(error.message, /\[REDACTED]/);
       return true;
@@ -243,7 +248,7 @@ test("redacts the machine token from connection errors", async () => {
   );
 });
 
-test("classifies connect timeout as retryable", async () => {
+test("treats connect timeout as terminal", async () => {
   const fetch: typeof globalThis.fetch = async (_input, init) =>
     new Promise<Response>((_resolve, reject) => {
       const signal = init?.signal;
@@ -263,7 +268,7 @@ test("classifies connect timeout as retryable", async () => {
       }).streamOnce({ onEvent: () => undefined }, new AbortController().signal),
     (error: unknown) =>
       error instanceof GardenStreamError &&
-      error.kind === "retryable" &&
+      error.kind === "terminal" &&
       /connection timed out/.test(error.message),
   );
 });
@@ -290,28 +295,7 @@ test("sends the token only in the authorization header", async () => {
   assert.equal(authorization, `Bearer ${TOKEN}`);
 });
 
-test("measures stable duration from the protocol handshake on EOF and stream errors", async () => {
-  const successfulFetch: typeof globalThis.fetch = async () =>
-    new Response("event: connected\ndata: {\"version\":1}\n\n", {
-      status: 200,
-      headers: { "Content-Type": "text/event-stream" },
-    });
-  const successTimes = [1_000, 2_250];
-  const successfulClient = new GardenSseClient({
-    baseUrl: new URL("https://garden.example.com"),
-    machineToken: TOKEN,
-    connectTimeoutMs: 100,
-    readIdleTimeoutMs: 100,
-    logger: silentLogger,
-    fetch: successfulFetch,
-    now: () => successTimes.shift() ?? 2_250,
-  });
-  const success = await successfulClient.streamOnce(
-    { onEvent: () => undefined },
-    new AbortController().signal,
-  );
-  assert.equal(success.durationMs, 1_250);
-
+test("treats an established stream failure as terminal", async () => {
   const encoder = new TextEncoder();
   const failingFetch: typeof globalThis.fetch = async () =>
     new Response(
@@ -325,15 +309,12 @@ test("measures stable duration from the protocol handshake on EOF and stream err
       }),
       { status: 200, headers: { "Content-Type": "text/event-stream" } },
     );
-  const failureTimes = [5_000, 7_000];
   const failingClient = new GardenSseClient({
     baseUrl: new URL("https://garden.example.com"),
     machineToken: TOKEN,
     connectTimeoutMs: 100,
-    readIdleTimeoutMs: 100,
     logger: silentLogger,
     fetch: failingFetch,
-    now: () => failureTimes.shift() ?? 7_000,
   });
   await assert.rejects(
     () =>
@@ -342,51 +323,29 @@ test("measures stable duration from the protocol handshake on EOF and stream err
         new AbortController().signal,
       ),
     (error: unknown) =>
-      error instanceof GardenStreamError && error.connectionDurationMs === 2_000,
+      error instanceof GardenStreamError &&
+      error.kind === "terminal" &&
+      /stream broke/.test(error.message),
   );
 });
 
-test("read-idle timeout is retryable while heartbeat chunks keep the stream alive", async () => {
+test("an idle stream remains open until the caller stops it", async () => {
   const idleServer = await startTestGardenServer({
     machineToken: TOKEN,
     onConnection: (connection) => connection.sendConnected(),
   });
-  try {
-    await assert.rejects(
-      () =>
-        clientFor(idleServer.baseUrl, { readIdleTimeoutMs: 15 }).streamOnce(
-          { onEvent: () => undefined },
-          new AbortController().signal,
-        ),
-      (error: unknown) =>
-        error instanceof GardenStreamError &&
-        error.kind === "retryable" &&
-        /read timed out/.test(error.message),
-    );
-  } finally {
-    await idleServer.close();
-  }
-
-  let interval: NodeJS.Timeout | undefined;
-  const heartbeatServer = await startTestGardenServer({
-    machineToken: TOKEN,
-    onConnection: (connection) => {
-      connection.sendConnected();
-      interval = setInterval(() => connection.sendComment(), 25);
-    },
-  });
   const controller = new AbortController();
-  const stopTimer = setTimeout(() => controller.abort(), 750);
+  const stopTimer = setTimeout(() => controller.abort(), 100);
   try {
-    const result = await clientFor(heartbeatServer.baseUrl, { readIdleTimeoutMs: 250 }).streamOnce(
+    const result = await clientFor(idleServer.baseUrl).streamOnce(
       { onEvent: () => undefined },
       controller.signal,
     );
+    assert.equal(result.connected, true);
     assert.equal(result.stopped, true);
   } finally {
     clearTimeout(stopTimer);
-    if (interval) clearInterval(interval);
-    await heartbeatServer.close();
+    await idleServer.close();
   }
 });
 
