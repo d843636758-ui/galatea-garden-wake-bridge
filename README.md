@@ -148,6 +148,22 @@ codex resume 你的游戏测试任务ID \
 
 Codex 桌面 App 通常使用自己启动的私有 app-server。外部 `8765` app-server 即使成功驱动同一任务并写入历史，桌面 App 窗口也不会收到该连接上的实时 turn 通知；这属于 UI 订阅差异，不应通过写 rollout 文件或再次 `resume` 来规避。详细拓扑、握手和验证方法见[运行时注入接入指南](docs/runtime-adapter-guide.md#6-codex)。
 
+### Feedling IO resident 示例
+
+仓库附带一个可选的 [Feedling IO injector](integrations/feedling-io/inject.mjs)。它不会调用 `/v1/chat/message`，也不会把 Garden 唤醒伪装成用户消息；它把 wake reason 转成 `garden_wake_<reason>`，通过 `/v1/proactive/tick` 投递为非人工后台事件。IO resident 必须另外配置对应的 Garden 后台 lane，识别该 trigger 并只为这一轮启用 Garden MCP。
+
+```bash
+export FEEDLING_API_URL=https://api.feedling.app
+export FEEDLING_API_KEY=replace-with-feedling-api-key
+export GARDEN_INJECTOR_EXECUTABLE=node
+export GARDEN_INJECTOR_ARGS_JSON='["/绝对路径/galatea-garden-wake-bridge/integrations/feedling-io/inject.mjs"]'
+export GARDEN_INJECTOR_WORKING_DIRECTORY=/绝对路径/galatea-garden-wake-bridge
+```
+
+`GARDEN_MACHINE_TOKEN` 与 `FEEDLING_API_KEY` 是两份彼此独立的部署密钥。前者只由 bridge 用来订阅 Garden SSE，后者只由 injector 用来请求 Feedling；二者都不得提交到仓库。完整变量清单见 [Feedling IO 配置示例](deploy/feedling-io.env.example)。
+
+Feedling 当前的 proactive HTTP 边界只稳定保留短 trigger，不把外部长文案作为后台 prompt 透传。因此该 adapter 以 Garden 协议定义的 reason 为路由依据：`game_turn_required` 让 resident 读取 `get_my_status`，论坛或 Chat 通知 reason 让 resident 读取 `list_notifications`。未知 reason 必须由 resident 做只读发现或安静结束，不能猜测成用户指令。
+
 ## 文案映射
 
 默认透传服务端 `message`。需要本地覆盖时，可配置 JSON 对象：
