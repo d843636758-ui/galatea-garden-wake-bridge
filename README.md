@@ -47,7 +47,7 @@ npm run build
 Linux/macOS Bash：
 
 ```bash
-export GARDEN_BASE_URL=https://galatea.abysslumina.com
+export GARDEN_BASE_URL=https://wake-v1.abysslumina.com
 export GARDEN_MACHINE_TOKEN=replace-with-machine-token
 export GARDEN_INJECTOR_EXECUTABLE=/absolute/path/to/inject-garden-wake
 export GARDEN_INJECTOR_ARGS_JSON='["--target","garden-agent"]'
@@ -61,7 +61,7 @@ node dist/cli.js run
 Windows PowerShell：
 
 ```powershell
-$env:GARDEN_BASE_URL = "https://galatea.abysslumina.com"
+$env:GARDEN_BASE_URL = "https://wake-v1.abysslumina.com"
 $env:GARDEN_MACHINE_TOKEN = "replace-with-machine-token"
 $env:GARDEN_INJECTOR_EXECUTABLE = "C:\runtime\inject-garden-wake.exe"
 $env:GARDEN_INJECTOR_ARGS_JSON = '["--target","garden-agent"]'
@@ -166,7 +166,7 @@ $env:GARDEN_WAKE_MESSAGE_MAP = '{"game_turn_required":"请立即查看当前游�
 
 | 环境变量 | 是否必填 | 行为 |
 | --- | --- | --- |
-| `GARDEN_BASE_URL` | 是 | 生产 Garden 地址；非本机地址必须使用 HTTPS。 |
+| `GARDEN_BASE_URL` | 否 | Wake 专用入口，默认 `https://wake-v1.abysslumina.com`；仅本地开发或自托管时覆盖，非本机地址必须使用 HTTPS。 |
 | `GARDEN_MACHINE_TOKEN` | 是 | Garden 为当前机器签发的机器级 token，仅用于订阅该机器的 SSE 和 Bearer 认证，并从日志中脱敏。 |
 | `GARDEN_INJECTOR_EXECUTABLE` | `run` 必填 | 用户提供的 runtime injector 可执行程序。 |
 | `GARDEN_INJECTOR_ARGS_JSON` | 否 | injector 参数 JSON 字符串数组；默认 `[]`。 |

@@ -20,6 +20,8 @@ export const DEFAULT_TIMEOUTS: Readonly<BridgeTimeouts> = Object.freeze({
   runtimeCloseMs: 10_000,
 });
 
+export const DEFAULT_GARDEN_BASE_URL = "https://wake-v1.abysslumina.com";
+
 export type LogLevel = "debug" | "info" | "warn" | "error";
 export type WakeMessageMap = Readonly<Record<WakeReason, string>>;
 
@@ -155,7 +157,7 @@ function parseInjectorArgs(raw: string | undefined): readonly string[] {
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
   return {
-    baseUrl: validateGardenBaseUrl(requireValue(env, "GARDEN_BASE_URL")),
+    baseUrl: validateGardenBaseUrl(env.GARDEN_BASE_URL?.trim() || DEFAULT_GARDEN_BASE_URL),
     machineToken: requireValue(env, "GARDEN_MACHINE_TOKEN"),
     wakeMessageMap: parseWakeMessageMap(env.GARDEN_WAKE_MESSAGE_MAP),
     injector: Object.freeze({

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ConfigError, loadConfig } from "../src/config.js";
+import { ConfigError, DEFAULT_GARDEN_BASE_URL, loadConfig } from "../src/config.js";
 import {
   createLogger,
   redactText,
@@ -31,6 +31,11 @@ test("accepts HTTP only for local Garden URLs", () => {
       }),
     ConfigError,
   );
+});
+
+test("uses the dedicated versioned Wake endpoint by default", () => {
+  const config = loadConfig({ GARDEN_MACHINE_TOKEN: "secret" });
+  assert.equal(config.baseUrl.origin, DEFAULT_GARDEN_BASE_URL);
 });
 
 test("loads and validates the runtime injector configuration", () => {

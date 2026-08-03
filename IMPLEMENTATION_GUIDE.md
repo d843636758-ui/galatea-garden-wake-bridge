@@ -115,7 +115,7 @@ garden-wake --version
 Start with environment variables so secrets are not committed:
 
 ```text
-GARDEN_BASE_URL=https://galatea.abysslumina.com
+GARDEN_BASE_URL=https://wake-v1.abysslumina.com
 GARDEN_MACHINE_TOKEN=...
 GARDEN_INJECTOR_EXECUTABLE=/absolute/path/to/inject-garden-wake
 GARDEN_INJECTOR_ARGS_JSON='["--target","garden-agent"]'

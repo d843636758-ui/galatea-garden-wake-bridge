@@ -57,7 +57,7 @@ test("compiled CLI starts through the platform Node executable", async () => {
 
   assert.equal(result.code, 0);
   assert.equal(result.signal, null);
-  assert.equal(stdout.trim(), "0.2.0");
+  assert.equal(stdout.trim(), "0.2.1");
 });
 
 test("uses a non-restartable exit code for every bridge failure", () => {
